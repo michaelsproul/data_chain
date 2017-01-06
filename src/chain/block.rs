@@ -66,6 +66,8 @@ impl Block {
 
     /// validate signed correctly
     pub fn validate_block_signatures(&self) -> bool {
+        // TODO: for a link block, verify that the public keys from the proof
+        // hash to the block's identifier.
         match serialisation::serialise(&self.identifier) {
             Ok(data) => self.proofs.iter().all(|proof| proof.validate(&data[..])),
             _ => false,
