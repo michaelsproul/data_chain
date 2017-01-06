@@ -101,6 +101,14 @@ impl NodeBlock {
         })
     }
 
+    /// Make a NodeBlock from its parts (FIXME: just a hack for the PoC).
+    pub fn raw(ident: BlockIdentifier, proof: Proof) -> Self {
+        NodeBlock {
+            identifier: ident,
+            proof: proof,
+        }
+    }
+
     /// Getter
     pub fn identifier(&self) -> &BlockIdentifier {
         &self.identifier

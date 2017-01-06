@@ -39,7 +39,7 @@ use std::path::PathBuf;
 /// If there was a restart then the nodes should validate and continue.
 /// N:B this means all nodes can use a named directory for data store and clear if they restart
 /// as a new id. This allows clean-up of old data cache directories.
-#[derive(Default, PartialEq, RustcEncodable, RustcDecodable)]
+#[derive(Default, PartialEq, RustcEncodable, RustcDecodable, Clone)]
 pub struct DataChain {
     chain: Vec<Block>,
     group_size: usize,
@@ -453,6 +453,8 @@ mod tests {
     use sha3::hash;
     use super::*;
     use tempdir::TempDir;
+    use std::collections::VecDeque;
+    use rust_sodium::crypto::sign::{PublicKey, SecretKey};
 
     #[test]
     fn validate_with_proof() {
@@ -494,6 +496,100 @@ mod tests {
         assert!(DataChain::validate_block_with_proof(&block3, &block2, 999));
         assert!(block3.add_proof(id3.unwrap().proof().clone()).is_ok());
         assert!(DataChain::validate_block_with_proof(&block3, &block2, 999));
+    }
+
+    // Create node blocks (proofs) for a given block identifier.
+    fn node_blocks_for(ident: &BlockIdentifier, keys: &[(PublicKey, SecretKey)])
+        -> VecDeque<NodeBlock>
+    {
+        keys.iter()
+            .map(|&(ref pk, ref sk)| NodeBlock::new(pk, sk, ident.clone()).unwrap())
+            .collect()
+    }
+
+    // Create a complete block for a given block identifier (signed by all keys listed).
+    fn signed_block(ident: BlockIdentifier, keys: &[(PublicKey, SecretKey)]) -> Block {
+        assert!(keys.len() > 0);
+        let mut node_blocks = node_blocks_for(&ident, keys);
+        let mut block = Block::new(node_blocks.pop_front().unwrap()).unwrap();
+        for node_block in node_blocks {
+            assert!(block.add_proof(node_block.proof().clone()).is_ok());
+        }
+        block
+    }
+
+    // Just a hack around DataChain only having the ability to add individual node blocks.
+    /*
+    fn add_block_to_chain(chain: &mut DataChain, block: Block) {
+        let proofs = block.proofs().clone();
+        let ident = block.identifier().clone();
+        let node_blocks = proofs.into_iter()
+            .map(|proof| NodeBlock::raw(ident.clone(), proof));
+
+        for node_block in node_blocks {
+            let _ = chain.add_node_block(node_block);
+        }
+    }
+    */
+
+    #[test]
+    fn broken() {
+        ::rust_sodium::init();
+
+        let group_size = 8;
+
+        let keys = (0..group_size)
+            .map(|_| crypto::sign::gen_keypair())
+            .collect_vec();
+
+        // We keep the group static for the whole test.
+        let pubs = keys.iter().map(|x| x.0).collect_vec();
+
+        // 1. Start with a link block to establish the group's members.
+        let link_desc = node_block::create_link_descriptor(&pubs).unwrap();
+        let block1 = signed_block(BlockIdentifier::Link(link_desc), &keys);
+
+        // 2. Construct the second block, for a piece of mutable data with
+        // name "some_name" and the hash for the piece of data "some_data_v1".
+        let data_mapping1 = BlockIdentifier::StructuredData(
+            hash(b"some_data_v1"),
+            DataIdentifier::Structured(hash(b"some_name"), 0)
+        );
+        let block2 = signed_block(data_mapping1.clone(), &keys);
+
+        // 3. Create a block representing the *re-assignment* of "some_name"
+        // to point a new piece of data (this is likely how Safecoin would work, right?).
+        let data_mapping2 = BlockIdentifier::StructuredData(
+            hash(b"some_data_v2"),
+            DataIdentifier::Structured(hash(b"some_name"), 0)
+        );
+        let block3 = signed_block(data_mapping2.clone(), &keys);
+
+        // Blocks 1, 2 and 3 should form a valid chain.
+        let mut data_chain = DataChain::from_blocks(vec![block1.clone(), block2.clone(), block3.clone()], group_size);
+        data_chain.mark_blocks_valid();
+        assert_eq!(data_chain.valid_len(), 3);
+
+        // Now, what's to stop a malicious individual from constructing a data chain
+        // that erases or undoes the mapping "some_name" => "some_data_v2"?
+
+        // Re-ordering is fine?
+        let mut reordered = DataChain::from_blocks(vec![block1.clone(), block3.clone(), block2.clone()], group_size);
+        reordered.mark_blocks_valid();
+        assert_eq!(reordered.valid_len(), 3);
+
+        // Removal of the last entry?
+        let mut removed = DataChain::from_blocks(vec![block1.clone(), block2.clone()], group_size);
+        removed.mark_blocks_valid();
+        assert_eq!(removed.valid_len(), 2);
+
+        // Pushing a duplicate version of block 2 to undo block 3's effect?
+        let mut duplicated = DataChain::from_blocks(
+            vec![block1.clone(), block2.clone(), block3.clone(), block2.clone()],
+            group_size
+        );
+        duplicated.mark_blocks_valid();
+        assert_eq!(duplicated.valid_len(), 4);
     }
 
     #[test]
